@@ -376,13 +376,11 @@ Deployment, cost and backup: **[docs/deployment.md](docs/deployment.md)**
 
 ### HTTP API
 
-```
-GET /api/corridor?to=NGNC[&from=USDC][&sizes=1,10,100]
-GET /api/corridor/trend?to=NGNC[&from=USDC][&limit=100]
-GET /api/assets
-GET /healthz
-GET /                            single-file UI, no build step
-```
+- [GET /healthz](docs/api.md#get-healthz)
+- [GET /api/assets](docs/api.md#get-assets)
+- [GET /api/corridor](docs/api.md#get-apicorridor)
+- [GET /api/corridor/trend](docs/api.md#get-apicorridortrend)
+- `GET /` single-file UI, no build step
 
 Beyond the contracts above, one field to know: **`live`** is on every response.
 `false` means the reading came from history because a live measurement failed,
