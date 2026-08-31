@@ -1,100 +1,75 @@
-# Wayfare API
+# HTTP API reference
 
-**Base URL:** `https://wayfare-cdb9.onrender.com`
+**Status:** implemented in the repository as of 2026-08-27. This document describes the handlers and wire fields present in `server/` at that date. It does not describe roadmap capabilities.
 
-## How this doc is structured
+All endpoints are read-only. The service does not hold funds, issue tokens, sign transactions, or execute payments.
 
-Every endpoint follows the same 4-part template to keep it scannable:
+## Endpoints
 
-```
-## [METHOD] /path
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/corridor` | Measure or retrieve one corridor |
+| `GET` | `/api/corridor/trend` | Read stored measurements for a corridor |
+| `GET` | `/api/assets` | List verified assets configured in the binary |
+| `GET` | `/healthz` | Return service health |
+| `GET` | `/` | Serve the embedded single-file UI |
 
-**Description:** 1-2 sentences — what it does and why it exists.
+Unsupported methods return `405`. JSON errors have the shape `{ "error": "..." }`.
 
-### Request
-* Headers / Path / Query / Body params with type, required/optional, defaults, and allowed values.
+## `GET /api/corridor`
 
-### Response
-* Success (status): Minimal valid JSON example with real issuer addresses, not placeholders.
-* cURL: Copy-pasteable command for prod and localhost.
-* Errors: List of status codes with exact error body shape from writeError.
+Query parameters:
 
-### Notes
-* Explanation of tricky fields (loss_pct, verdict, live vs stale, integrity).
-* Edge cases (empty history, fallback behavior).
-```
+- `from` — send asset code; defaults to `USDC`.
+- `to` — receive asset code; defaults to `NGNC`.
+- `sizes` — optional comma-separated positive decimal send amounts. The server accepts at most 24 values. When omitted, the route ladder's default sizes are used.
+- `live=1` — when history-first mode is enabled, bypass stored history and request a live measurement.
 
-## GET /assets
+The destination must be a configured asset with a verified fiat peg. Amounts, rates, percentages, and sizes are decimal strings, not JSON numbers.
 
-**Description:** Lists all known Stellar assets and whether they can be used as a corridor destination.
+A successful response contains:
 
-### Request
+- `send_asset`, `receive_asset` — asset code, issuer where applicable, and verified fiat peg.
+- `integrity` — `DIRECT`, `DERIVATIVE`, `NO-MARKET`, or `UNKNOWN`; this describes corridor structure and is independent of verdict.
+- `depends_on` — fiat-token dependencies for a derivative corridor.
+- `reference_mid`, `reference_source`, `reference_pair` — the benchmark used for scoring.
+- `reference_agreement`, optional secondary mid/source/divergence/note, and `scored` — the two-provider benchmark cross-check.
+- `reference_fetched_at` — when the benchmark was obtained, when available.
+- `floor_loss_pct`, `floor_size`, `worst_loss_pct`, `worst_size` — ladder summary values.
+- `recommended` — the best acceptable quote, or JSON `null` when no size is recommendable.
+- `recommended_size` — the send size of the recommendation, when one exists.
+- `finding` — explanatory prose about the measurement.
+- `rungs` — one entry per requested size.
+- `measured_at` — timestamp of the response measurement or stored reading.
+- `live` — `true` for a fresh measurement and `false` for history.
+- `stale` — present only when `live` is `false`; contains `recorded_at`, `age_seconds`, and `age_human`.
+- `findings` — present only when counterparty checks or metrics were run; findings qualify the headline and do not change integrity or verdict.
 
-**Headers:**
-* `Accept`: application/json
+Each rung includes `send_amount`, `priced`, `integrity`, optional `quote`, notes, and an error when that size could not be measured. A priced rung may also include:
 
-### Response
+- `marginal_cost` — the change in effective receive-asset cost from the previous valid priced rung.
+- `marginal_from` and `marginal_to` — the valid ladder sizes defining that marginal measurement.
+- `cost` — the available cost decomposition.
 
-**Success (200 OK):**
-```json
-{
-  "assets": [
-    {
-      "code": "NGNC",
-      "issuer": "GASBV6W7GGED66MXEVC7YZHTWWYMSVYEY35USF2HJZBLABLYIFQGXZY6",
-      "peg": "NGN",
-      "can_be_destination": true
-    },
-    {
-      "code": "USDC",
-      "issuer": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
-      "peg": "USD",
-      "can_be_destination": true
-    },
-    {
-      "code": "GHSC",
-      "issuer": "GASBV6W7GGED66MXEVC7YZHTWWYMSVYEY35USF2HJZBLABLYIFQGXZY6",
-      "peg": "GHS",
-      "can_be_destination": true
-    },
-    {
-      "code": "KESC",
-      "issuer": "GASBV6W7GGED66MXEVC7YZHTWWYMSVYEY35USF2HJZBLABLYIFQGXZY6",
-      "peg": "KES",
-      "can_be_destination": true
-    }
-  ]
-```
+The first valid priced rung has no marginal cost. Missing rungs are skipped, never treated as zero. The current marginal classification is available on the internal ladder result as `improving`, `flat`, `worsening`, or `undetermined`; fewer than two valid priced points are undetermined.
+
+A live measurement failure is served from the latest stored run when one exists, labelled `live: false`. If no stored run exists, the request returns an error rather than fabricating a reading.
 
 **cURL:**
+
 ```bash
-curl -s https://wayfare-cdb9.onrender.com/api/assets
+# History-first (fast, may be stale)
+curl -s "https://wayfare-cdb9.onrender.com/api/corridor?from=USDC&to=NGNC"
+
+# Live measurement
+curl -s "https://wayfare-cdb9.onrender.com/api/corridor?from=USDC&to=NGNC&live=1"
+
+# Custom sizes
+curl -s "https://wayfare-cdb9.onrender.com/api/corridor?from=USDC&to=NGNC&sizes=10,100,500&live=1"
 ```
 
-**Errors:**
-* `405 Method Not Allowed`: Only GET supported.
-* `500 Internal Server Error`: Failed to load assets.
+**Example Response (200 OK):**
 
----
-
-## GET /api/corridor
-
-**Description:** Measures how much of the destination token you get for a given amount of source token by checking the live Stellar DEX orderbooks. Compares that to the real-world FX mid rate.
-
-### Request
-
-**Headers:**
-* `Accept`: application/json
-
-**Query Parameters:**
-* `from` (string, optional, default: "USDC") - Asset you send. Must be in KnownCodes: GHSC, KESC, NGNC, USDC.
-* `to` (string, optional, default: "NGNC") - Asset you want to receive. Must have a fiat peg.
-* `sizes` (string, optional, default: "0.1,1,5,10,25,50,100,250,500,1000,2500,5000") - Comma-separated USDC amounts to test. Example: `sizes=10,100,500`.
-* `live` (string, optional) - If set to `1`, forces a live DEX measurement. If omitted, serves last stored measurement from history when available.
-
-### Response
-
-**Success (200 OK):**
 ```json
 {
   "send_asset": {
@@ -216,57 +191,25 @@ curl -s https://wayfare-cdb9.onrender.com/api/assets
 }
 ```
 
+## `GET /api/corridor/trend`
+
+Query parameters:
+
+- `from` — send asset code; defaults to `USDC`.
+- `to` — receive asset code; defaults to `NGNC`.
+- `limit` — positive whole number; defaults to 100 and is capped at 500.
+
+This endpoint reads stored history only; it never measures. It returns `200` with `count: 0` and `runs: []` for an empty history. Runs are returned oldest first. Each run carries its sequence, timestamp, integrity, dependencies, reference details, ladder summary, finding, and rung loss/verdict values.
+
 **cURL:**
+
 ```bash
-# History-first (fast, may be stale)
-curl -s "https://wayfare-cdb9.onrender.com/api/corridor?from=USDC&to=NGNC"
-
-# Live measurement
-curl -s "https://wayfare-cdb9.onrender.com/api/corridor?from=USDC&to=NGNC&live=1"
-
-# Custom sizes
-curl -s "https://wayfare-cdb9.onrender.com/api/corridor?from=USDC&to=NGNC&sizes=10,100,500&live=1"
+curl -s "https://wayfare-cdb9.onrender.com/api/corridor/trend?from=USDC&to=NGNC&limit=30"
+curl -s "https://wayfare-cdb9.onrender.com/api/corridor/trend?to=NGNC&limit=7"
 ```
 
-**Errors:**
-* `400 Bad Request`: Unknown `from` or `to` asset. Body: `{"error": "unknown send asset \"XYZ\"; verified assets are GHSC, KESC, NGNC, USDC"}`
-* `400 Bad Request`: No fiat peg for destination. Body: `{"error": "no verified fiat peg for BTC, so there is no independent rate to score it against"}`
-* `400 Bad Request`: Invalid sizes format. Body: `{"error": "invalid sizes ..."}`
-* `405 Method Not Allowed`: Only GET supported.
-* `502 Bad Gateway`: Live measurement failed and no history exists. Body: `{"error": "measuring corridor: no size could be measured; every request failed..."}`
-* `504 Gateway Timeout`: Upstream DEX/FX timed out. Returns stale cache if available, otherwise this error.
+**Example Response (200 OK):**
 
-### Notes
-
-* **What it does:** Tells you "If I send 10 USDC on Stellar, how many NGNC will I actually get?" and "How bad is that compared to the real bank rate?"
-* **from / to:** Think of this as a currency pair, but for Stellar tokens. `from` is what you have, `to` is what you want.
-* **reference_mid:** The real-world mid rate (e.g. USD/NGN = 1350 from exchangerate-api). This is your benchmark.
-* **loss_pct / effective_rate:** How much worse the DEX is than the benchmark. `loss_pct: 4.31` means you lose 4.31% vs the bank rate. Higher is worse.
-* **verdict:** FAIR / POOR / UNUSABLE - auto-graded based on loss. UNUSABLE > ~25% loss.
-* **rungs:** Same route tested at different sizes. Liquidity gets thin, so 0.1 USDC might be FAIR but 5000 USDC is 97% loss.
-* **live vs history:** Without `live=1`, API returns last saved measurement (fast). With `live=1`, it hits the DEX live (slow, 2-5s). If live fails, it falls back to stale history.
-* **findings:** Automated security/compliance checks (SEP-10 auth, SEP-24 info, issuer flags). `passed: false` with `severity: warning` means that check failed but corridor still works.
-* **integrity:** `DIRECT` means measurement is direct from orderbooks. If stale, it still has same shape.
-
----
-
-## GET /api/corridor/trend
-
-**Description:** Returns historical corridor measurements over time for charting loss and rate trends. Reads from runstore, oldest first.
-
-### Request
-
-**Headers:**
-* `Accept`: application/json
-
-**Query Parameters:**
-* `from` (string, optional, default: "USDC") - Send asset.
-* `to` (string, optional, default: "NGNC") - Receive asset.
-* `limit` (integer, optional, default: 30) - Max records to return. Parsed by `parseTrendLimit`. Example: `limit=7` for last 7 runs.
-
-### Response
-
-**Success (200 OK):**
 ```json
 {
   "corridor": "USDC-NGNC",
@@ -297,63 +240,74 @@ curl -s "https://wayfare-cdb9.onrender.com/api/corridor?from=USDC&to=NGNC&sizes=
 }
 ```
 
+## `GET /api/assets`
+
+Returns an `assets` array. Each entry contains the asset fields and `can_be_destination`, which is true when the binary has a verified fiat peg for that asset.
+
 **cURL:**
+
 ```bash
-curl -s "https://wayfare-cdb9.onrender.com/api/corridor/trend?from=USDC&to=NGNC&limit=30"
-curl -s "https://wayfare-cdb9.onrender.com/api/corridor/trend?to=NGNC&limit=7"
+curl -s https://wayfare-cdb9.onrender.com/api/assets
 ```
 
-**Errors:**
-* `400 Bad Request`: Unknown asset. `{"error": "unknown send asset \"XYZ\"; verified assets are GHSC, KESC, NGNC, USDC"}`
-* `400 Bad Request`: No fiat peg for receive asset.
-* `400 Bad Request`: Invalid limit. `{"error": "invalid limit ..."}`
-* `405 Method Not Allowed`: Only GET supported.
-* `500 Internal Server Error`: `{"error": "reading stored history: ..."}`
+**Example Response (200 OK):**
 
-### Notes
-
-* **What it does:** Shows history. Instead of one snapshot, you get last N measurements (e.g. last 30 runs). Good for graphing "is NGNC liquidity getting better or worse?"
-* **runs[] order:** Oldest first (timeline order). Your chart can plot `recorded_at` on X-axis, `floor_loss_pct` on Y-axis.
-* **seq / recorded_at:** `seq` is incrementing ID in runstore. `recorded_at` is when that measurement was taken.
-* **floor_loss_pct vs worst_loss_pct:** `floor` = best case (smallest size, 0.1 USDC) — shows structural cost. `worst` = largest size tested. If floor is already 27%, corridor is unusable even for tiny amounts.
-* **rungs inside each run:** Simplified to `send_amount`, `loss_pct`, `verdict` for trend view. No full quote/cost to keep payload small.
-* **count:** Actual records returned (may be < limit if not enough history).
-* **Empty history:** If no records yet, returns `{"corridor":"USDC-NGNC","count":0,"runs":[]}` with 200 OK, not an error.
-* **reference:** Same FX benchmark as corridor endpoint, but snapshot at that time. `divergence_pct` tells you if two FX sources disagreed that day.
-
----
-
-## GET /healthz
-
-**Description:** Liveness probe. Returns ok if server is running. No dependencies checked.
-
-### Request
-
-**Headers:**
-* None
-
-**Query Parameters:**
-* None
-
-### Response
-
-**Success (200 OK):**
 ```json
 {
-  "status": "ok"
-}
+  "assets": [
+    {
+      "code": "NGNC",
+      "issuer": "GASBV6W7GGED66MXEVC7YZHTWWYMSVYEY35USF2HJZBLABLYIFQGXZY6",
+      "peg": "NGN",
+      "can_be_destination": true
+    },
+    {
+      "code": "USDC",
+      "issuer": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+      "peg": "USD",
+      "can_be_destination": true
+    },
+    {
+      "code": "GHSC",
+      "issuer": "GASBV6W7GGED66MXEVC7YZHTWWYMSVYEY35USF2HJZBLABLYIFQGXZY6",
+      "peg": "GHS",
+      "can_be_destination": true
+    },
+    {
+      "code": "KESC",
+      "issuer": "GASBV6W7GGED66MXEVC7YZHTWWYMSVYEY35USF2HJZBLABLYIFQGXZY6",
+      "peg": "KES",
+      "can_be_destination": true
+    }
+  ]
 ```
+
+## `GET /healthz`
+
+A healthy service returns status `200` with:
 
 **cURL:**
 ```bash
-curl -s https://wayfare-cdb9.onrender.com/healthz | jq
-curl -s http://localhost:8080/healthz | jq
+curl -s https://wayfare-cdb9.onrender.com/healthz 
 ```
 
-**Errors:**
-* None. Always 200 if process is up. If server is down, connection fails.
+**Example Response (200 OK):**
 
-### Notes
-* Use for load balancer / Render health checks. Should be cheap and unauthenticated.
+```json
+{ "status": "ok" }
+```
 
----
+This endpoint checks that the HTTP service is responding. It does not perform a live corridor measurement or validate upstream availability.
+
+## Freshness and provenance
+
+`live` is not a verdict. It describes where the response came from. A response with `live: false` is historical, and its `stale` envelope is authoritative for age. Consumers must not infer freshness from deployment time, request time, or the absence of an error.
+
+Reference rates are never averaged. The response identifies the provider and, when available, the second provider and divergence. `NO-MARKET` means no path was returned; it is not the same claim as a priced route with an `UNUSABLE` verdict.
+
+## Related contracts
+
+- [Run store](run-store.md) — stored record and hash-chain format
+- [Snapshot format](snapshot-format.md) — recorded upstream bytes
+- [Checks](checks.md) — tri-state counterparty findings and metrics
+- [Contributing](../CONTRIBUTING.md) — invariants for changes
